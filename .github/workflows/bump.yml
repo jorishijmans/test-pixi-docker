@@ -1,0 +1,37 @@
+name: Bump
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: 0 6 * * *
+
+jobs:
+  bump-pixi:
+    name: Reference latest Pixi version in README
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Assert latest pixi version is mentioned in README
+        id: bump
+        run: |
+          set -euo pipefail
+          latest_version="$(gh repo view --json latestRelease prefix-dev/pixi | jq -r '.latestRelease.tagName')"
+          echo latest-version=$latest_version >> $GITHUB_OUTPUT
+          latest_version_no_v=${latest_version#v}
+          sed -i "s/ARG PIXI_VERSION=.*/ARG PIXI_VERSION=$latest_version_no_v/" Dockerfile
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@271a8d0340265f705b14b6d32b9829c1cb33d45e # v7.6.0
+        if: github.ref_name == 'main'
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: Bump pixi version to ${{ steps.bump.outputs.latest-version }}
+          title: Bump pixi version to ${{ steps.bump.outputs.latest-version }}
+          labels: enhancement
+          branch: bump-pixi-${{ steps.bump.outputs.latest-version }}

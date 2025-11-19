@@ -1,0 +1,201 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  DEFAULT_BASE_IMAGE: ubuntu:noble
+
+jobs:
+  version:
+    name: Check if version changed
+    runs-on: ubuntu-latest
+    outputs:
+      push: ${{ steps.push.outputs.push }}
+      version-changed: ${{ steps.version-metadata.outputs.changed }}
+      new-version: ${{ steps.version-metadata.outputs.newVersion }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: Quantco/ui-actions/version-metadata@cd71d2a0e30b25569f6d723e57acca83347e58fc # v1.0.18
+        id: version-metadata
+        with:
+          file: Dockerfile
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version-extraction-override: 'regex:ARG PIXI_VERSION=(.*)'
+      - name: Determine if pushing images
+        id: push
+        run: echo push=${{ github.event_name == 'push' && github.ref_name == 'main' }} >> $GITHUB_OUTPUT
+
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        base-image:
+         # https://hub.docker.com/_/debian
+         # https://hub.docker.com/layers/library/debian/bookworm-slim/
+         - debian:bookworm-slim@sha256:b4aa902587c2e61ce789849cb54c332b0400fe27b1ee33af4669e1f7e7c3e22f # 12
+         - debian:bookworm # 12
+         - debian:bullseye-slim # 11
+         - debian:bullseye # 11
+         # https://hub.docker.com/_/ubuntu
+         # https://hub.docker.com/layers/library/ubuntu/plucky/
+         - ubuntu:plucky@sha256:27771fb7b40a58237c98e8d3e6b9ecdd9289cec69a857fccfb85ff36294dac20 # 25.04
+         # https://hub.docker.com/layers/library/ubuntu/oracular/
+         - ubuntu:oracular@sha256:cdf755952ed117f6126ff4e65810bf93767d4c38f5c7185b50ec1f1078b464cc # 24.10
+         # https://hub.docker.com/layers/library/ubuntu/noble/
+         - ubuntu:noble@sha256:c35e29c9450151419d9448b0fd75374fec4fff364a27f176fb458d472dfc9e54 # 24.04
+         # https://hub.docker.com/layers/library/ubuntu/jammy/
+         - ubuntu:jammy@sha256:104ae83764a5119017b8e8d6218fa0832b09df65aae7d5a6de29a85d813da2fb # 22.04
+         # https://hub.sha256:104ae83764a5119017b8e8d6218fa0832b09df65aae7d5a6de29a85d813da2fb2.9.1-base-ubuntu24.04
+         - nvidia/cuda:12.9.1-base-ubuntu22.04
+         - nvidia/cuda:12.9.1-base-ubuntu20.04
+         - nvidia/cuda:13.0.0-base-ubuntu24.04
+         - nvidia/cuda:13.0.0-base-ubuntu22.04
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+    - name: Set image variables
+      id: image-variables
+      env:
+        IMAGE: ${{ matrix.base-image }}
+      run: |
+        import os
+
+        base_image = "${{ matrix.base-image }}"
+        # Split off any digest
+        ref, _, digest = base_image.partition("@")  # "debian:bookworm-slim", "sha256:...", etc.
+
+        if ref.startswith("nvidia/cuda"):
+            code_names = {
+                "22.04": "jammy",
+                "20.04": "focal",
+                "24.04": "noble",
+                "24.10": "oracular",
+                "25.04": "plucky"
+            }
+            ubuntu_version_number = ref.split("-ubuntu")[-1]
+            base_tag = ref.split(":")[-1]
+            cuda_version = base_tag.split("-")[0]
+            tag = f"{code_names[ubuntu_version_number]}-cuda-{cuda_version}"
+            platforms = "linux/amd64,linux/arm64"
+        else:
+            # Tag based on the *tag* part only, without digest.
+            tag = ref.split(":")[-1]
+            platforms = "linux/amd64,linux/arm64"
+
+        # Compare the digest-free ref to DEFAULT_BASE_IMAGE
+        if ref == "${{ env.DEFAULT_BASE_IMAGE }}":
+            is_default = "true"
+        else:
+            is_default = "false"
+
+        GITHUB_OUTPUT = os.environ["GITHUB_OUTPUT"]
+        with open(GITHUB_OUTPUT, "a") as f:
+            f.write(f"tag={tag}\n")
+            f.write(f"platforms={platforms}\n")
+            f.write(f"is-default={is_default}\n")
+      shell: python
+      
+    - name: Get docker metadata
+      id: metadata
+      uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
+      with:
+        images: |-
+          ghcr.io/jorishijmans/pixi
+        flavor: latest=false
+        # latest
+        # base-image
+        # major.minor.patch
+        # major.minor.patch-base-image
+        tags: |
+            type=raw,value=latest,priority=1000,enable=${{ steps.image-variables.outputs.is-default }}
+            type=raw,value=${{ steps.image-variables.outputs.tag }},priority=900
+            type=semver,pattern={{version}},enable=${{ steps.image-variables.outputs.is-default }},value=${{ needs.version.outputs.new-version }},priority=800
+            type=semver,pattern={{version}}-${{ steps.image-variables.outputs.tag }},value=${{ needs.version.outputs.new-version }},priority=500
+            
+    - name: Setup docker buildx
+      uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+    - name: Login to GHCR
+      uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build Docker images
+      id: build
+      uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+      with:
+        # Build multi-platform images and attach provenance (mode=max) and SBOM attestations.
+        # Note: images with attestations must be pushed to a registry (not loaded locally). [[Attestations](https://docs.docker.com/build/ci/github-actions/attestations/)]
+        provenance: mode=max
+        sbom: true
+        platforms: ${{ steps.image-variables.outputs.platforms }}
+        push: ${{ needs.version.outputs.push == 'true' }}
+        build-args: |-
+          BASE_IMAGE=${{ matrix.base-image }}
+        tags: ${{ steps.metadata.outputs.tags }}
+        labels: ${{ steps.metadata.outputs.labels }}
+
+    - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      with:
+        name: ${{ steps.image-variables.outputs.tag }}
+        path: ${{ steps.metadata.outputs.bake-file }}
+
+    - name: Authenticate with Docker (Scout)
+      uses: docker/login-action@v3
+      with:
+        username: ${{ vars.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Run Docker Scout CVE scan
+      if: needs.version.outputs.push == 'true'
+      uses: docker/scout-action@v1
+      with:
+        command: cves
+        image: ghcr.io/jorishijmans/pixi:${{ needs.version.outputs.new-version }}-${{ steps.image-variables.outputs.tag }}
+        only-severities: critical,high
+        exit-code: true
+
+    - name: Run tests
+      # # Image is pushed; pull and run tests against the pushed tag because buildx does not support outputting the image.
+      if: needs.version.outputs.push == 'true'
+      run: |
+        docker images
+        # Test the pixi binary is available
+        docker run --rm ghcr.io/jorishijmans/pixi:${{ needs.version.outputs.new-version }}-${{ steps.image-variables.outputs.tag }} pixi --version
+        # Test end-to-end pixi workflow
+        docker run --rm ghcr.io/jorishijmans/pixi:${{ needs.version.outputs.new-version }}-${{ steps.image-variables.outputs.tag }} sh -c "mkdir /app && cd /app && pixi init && pixi add python && pixi run python --version"
+        # Test pixi global binaries are in PATH
+        docker run --rm ghcr.io/jorishijmans/pixi:${{ needs.version.outputs.new-version }}-${{ steps.image-variables.outputs.tag }} sh -c "pixi global install rsync && rsync --version"
+
+    - name: Image digest
+      run: echo ${{ steps.build.outputs.digest }}
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: needs.version.outputs.push == 'true'
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Push ${{ needs.version.outputs.new-version }} tag
+        run: |
+          git tag ${{ needs.version.outputs.new-version }}
+          git push origin ${{ needs.version.outputs.new-version }}
+      - name: Create release
+        uses: softprops/action-gh-release@6da8fa9354ddfdc4aeace5fc48d7f679b5214090 # v2.4.1
+        with:
+          generate_release_notes: true
+          tag_name: ${{ needs.version.outputs.new-version }}
