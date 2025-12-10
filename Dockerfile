@@ -1,4 +1,4 @@
-ARG PIXI_VERSION=0.59.0
+ARG PIXI_VERSION=0.61.0
 # Pin base image by tag + digest to improve
 # supply-chain integrity and reproducability.
 # Auto-update pinned images with Docker Scout Policy + remediation PRs
